@@ -93,6 +93,7 @@ docs/                             source documents, kept verbatim with credits
   WATCHER_SETUP_GUIDE.md          how the event-driven pattern was derived
   COORDINATION_PROTOCOL_DRAFT.md  change-class governance proposal
   INTEGRATION_CLAUDE_CODE.md      six real failure modes behind the one-shot shape
+  INTEGRATION_OPENCODE.md         daemon bridge + in-session blocking arm, tested
 ```
 
 Pick the watcher that matches your harness's wake model: **loop-and-print**
