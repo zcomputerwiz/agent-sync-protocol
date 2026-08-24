@@ -56,38 +56,48 @@ Schema (v1):
   "status": "superseded",
   "from": "publishing-node",
   "date": "RFC3339",
-  "reason": "why the old artifact must not be selected",
+  "reason": "nonempty; why the old artifact must not be selected",
   "supersedes": [
-    {"path": "project/inbox/old.json", "sha256": "<64-hex>",
-     "publisher": "node-that-published-old.json"}
+    {"path": "project/inbox/old.json", "sha256": "<64-hex lowercase>",
+     "publisher": "node-that-published-old.json (required)"}
   ],
   "replacement": {"path": "project/inbox/new.json",
-                  "sha256": "<64-hex>"} | null
+                  "sha256": "<64-hex>"} | null,
+  "operator_ratified": false
 }
 ```
 
-Canonical rules: paths are root-relative, forward-slash, exact-case, NFC;
-hashes are lowercase 64-hex over payload file bytes. `publisher` is optional
-- absent means the manifest author.
+Canonical rules: paths are root-relative, forward-slash, exact-case, NFC,
+no `.`/`..`/drive/backslash segments (validated before any filesystem
+access); hashes are lowercase 64-hex over payload file bytes. `date` must be
+RFC3339; `reason` must be nonempty; every supersedes entry requires a
+nonempty `publisher`.
 
 **Authority (R7).** A manifest is AUTHORITATIVE only when every supersedes
-entry's publisher matches `from` (absent publisher inherits the author).
-AUTHORITATIVE manifests apply; others are REQUESTED - listed by `resolve`
-but never applied until the publishing node or the operator ratifies.
+entry's publisher matches `from`. An entry whose explicit publisher differs
+demotes the manifest to REQUESTED. A REQUESTED manifest applies only when it
+carries `"operator_ratified": true`, in which case it is applied and tagged
+OPERATOR_RATIFIED in resolver output.
 
 **Existence asymmetry (R6).** A missing or hash-mismatched *replacement* is
 a BROKEN_REF failure; a missing *supersedes target* is informational only -
 an absent artifact cannot be selected anyway.
 
+**Fail-closed selection.** Any exception - INVALID_MANIFEST, CONFLICT,
+CYCLE, BROKEN_REF - means NOTHING is selected: `resolve` reports the
+diagnostics and returns an empty selection. Diagnostics and selection are
+never mixed in one output.
+
 **Consumer behavior** (implemented by `sync_tools.py resolve <dir>`):
 
 1. Consider only READY manifests (per-file gating - never claim's exit code).
-2. Validate structure; invalid manifests fail closed (INVALID_MANIFEST).
+2. Validate structure and canonical paths; invalid manifests fail closed.
 3. Verify referenced bytes: replacement missing/mismatched fails closed;
    supersedes-target mismatch fails closed; supersedes-target absent is
    informational.
 4. Resolve transitively across replacement chains; detect CONFLICT (two
-   authoritative replacements for one artifact) and CYCLE - both fail closed.
+   authoritative replacements for one artifact), withdrawal-vs-replacement
+   conflicts, and CYCLE - all fail closed.
 5. Never infer supersession from mtime, filename similarity, or prose alone.
 
 ## 4. Two hashes, two questions
@@ -113,7 +123,6 @@ an absent artifact cannot be selected anyway.
 | `REVIEW_<topic>.md` | review verdicts |
 | `REQUEST_<topic>.md` | open request for any node to pick up |
 | `STOP_READ_FIRST.md` | reserved for run-killing corrections; keep this name sacred |
-| `CLOSED_<topic>.md` | narrative closure notes (human-readable) |
 | `CLOSED_<topic>.md`, `VERIFIED_<topic>.md` | closure markers with final state |
 | `CLOSED_<topic>_<node>.json` | **supersession manifest** - machine-consumed closure selecting which published bytes are authoritative (schema: §3.1) |
 

@@ -114,11 +114,40 @@ def _iter_manifest_files(directory: Path, ready_rel: set[str]):
             yield rel, p
 
 
+def _canonical_rel_path(raw: str) -> str | None:
+    """Return canonical root-relative posix path, or None if invalid (R2).
+
+    Rejects: absolute paths, drive prefixes, backslashes, leading/trailing
+    slashes, '.' or '..' segments, empty segments, non-NFC unicode.
+    """
+    import unicodedata
+    if not isinstance(raw, str) or not raw:
+        return None
+    if unicodedata.normalize("NFC", raw) != raw:
+        return None
+    if "\\" in raw or raw.startswith("/") or raw.endswith("/"):
+        return None
+    if re.match(r"^[A-Za-z]:", raw):
+        return None
+    parts = raw.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def _rfc3339(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(re.match(
+        r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?"
+        r"([Zz]|[+-]\d{2}:\d{2})$", value))
+
+
 def resolve_dir(directory: Path) -> dict:
     """Resolve supersession manifests deterministically. See module docstring."""
     result = {
         "artifacts": {},        # node_key -> {"status": str, "by": key|None}
-        "requested": [],        # non-authoritative manifests (R7)
+        "requested": [],        # non-authoritative manifests awaiting action
         "exceptions": [],       # CONFLICT / CYCLE / BROKEN_REF / INVALID_MANIFEST
         "manifests": [],        # metadata for every manifest considered
         "informational": [],    # absent supersedes targets (R6)
@@ -127,7 +156,6 @@ def resolve_dir(directory: Path) -> dict:
 
     edges = []                  # (src_key, tgt_key|None, manifest_ref)
     all_nodes = set()           # every referenced-and-verified node
-    nodes_on_disk = {}          # node_key -> relpath present on disk
 
     ready, transferring, unverified = status(directory)
     ready_rel = {p.relative_to(directory).as_posix() for p in ready}
@@ -161,25 +189,33 @@ def resolve_dir(directory: Path) -> dict:
             bad = f"status {m.get('status')!r} != 'superseded'"
         elif not isinstance(m.get("from"), str) or not m["from"]:
             bad = "missing 'from'"
-        elif not isinstance(m.get("date"), str) or not m["date"]:
-            bad = "missing 'date'"
+        elif not _rfc3339(m.get("date", "")):
+            bad = "missing or malformed 'date' (RFC3339)"
+        elif not isinstance(m.get("reason"), str) or not m["reason"].strip():
+            bad = "missing 'reason'"
         sup = m.get("supersedes")
         if bad is None and (
                 not isinstance(sup, list) or not sup
                 or not all(isinstance(e, dict) for e in sup)):
             bad = "'supersedes' must be a non-empty list of objects"
-        else:
-            for e in sup or []:
-                if not isinstance(e.get("path"), str) or not e["path"]:
-                    bad = "supersedes entry missing 'path'"
-                elif not HEX64.fullmatch(str(e.get("sha256", ""))):
-                    bad = f"supersedes entry bad sha256: {e.get('sha256')!r}"
-                    break
         repl = m.get("replacement")
         if bad is None and repl is not None:
-            if not isinstance(repl, dict) or not isinstance(repl.get("path"), str) \
-                    or not HEX64.fullmatch(str(repl.get("sha256", ""))):
+            if not isinstance(repl, dict):
                 bad = "invalid 'replacement'"
+        if bad is not None:
+            result["exceptions"].append(
+                {"kind": "INVALID_MANIFEST", "manifest": rel, "detail": bad})
+            continue
+
+        # R2: canonical path rules - enforced before any filesystem access.
+        cand_paths = [e.get("path") for e in sup]
+        if repl is not None:
+            cand_paths.append(repl.get("path"))
+        for cp in cand_paths:
+            canon = _canonical_rel_path(cp)
+            if canon is None:
+                bad = f"non-canonical path: {cp!r}"
+                break
         if bad is not None:
             result["exceptions"].append(
                 {"kind": "INVALID_MANIFEST", "manifest": rel, "detail": bad})
@@ -189,19 +225,28 @@ def resolve_dir(directory: Path) -> dict:
         publisher_mismatch = False
         for e in sup:
             pub = e.get("publisher")
-            pub = pub if isinstance(pub, str) else None
-            # Absent publisher inherits the manifest author (lightweight
-            # schema); an explicit DIFFERENT publisher demotes to REQUESTED.
-            if pub is not None and pub != m["from"]:
-                publisher_mismatch = True
+            # R1/R7: publisher is REQUIRED on every entry and must be a
+            # nonempty string. Absent/garbage publisher -> INVALID_MANIFEST.
+            if not isinstance(pub, str) or not pub.strip():
+                bad = "supersedes entry missing nonempty 'publisher'"
+                break
             entries.append({
-                "path": e["path"], "sha256": e["sha256"],
-                "publisher": pub,
+                "path": e["path"], "sha256": e["sha256"], "publisher": pub,
             })
-        authority = "REQUESTED" if publisher_mismatch else "AUTHORITATIVE"
+            if pub != m["from"]:
+                publisher_mismatch = True
+        if bad is not None:
+            result["exceptions"].append(
+                {"kind": "INVALID_MANIFEST", "manifest": rel, "detail": bad})
+            continue
+
+        operator_ratified = m.get("operator_ratified") is True
+        authority = ("AUTHORITATIVE" if not publisher_mismatch
+                     else "OPERATOR_RATIFIED" if operator_ratified
+                     else "REQUESTED")
         meta = {"manifest": rel, "from": m["from"], "date": m["date"],
                 "authority": authority,
-                "reason": m.get("reason", ""),
+                "reason": m["reason"].strip(),
                 "entries": entries,
                 "replacement": repl}
         result["manifests"].append(meta)
@@ -212,7 +257,7 @@ def resolve_dir(directory: Path) -> dict:
             result["requested"].append(meta)
             continue
 
-        # Disk verification and edges apply only to authoritative manifests.
+        # Disk verification and edges apply only to applicable manifests.
         for e in entries:
             key = _node_key(e["path"], e["sha256"])
             src_keys.append(key)
@@ -251,11 +296,28 @@ def resolve_dir(directory: Path) -> dict:
                  "detail": f"{sk} superseded by multiple replacements: "
                            + ", ".join(sorted(real))})
 
-    # Transitive resolution over the applied graph.
+    # Fail-closed: any exception means NOTHING is selected.
+    if result["exceptions"]:
+        result["artifacts"] = {}
+        return result
+
+    # Withdrawal edges (replacement null) conflict with replacement edges
+    # for the same source; withdrawals themselves resolve to WITHDRAWN.
+    withdrawal_srcs = {sk for sk, tk in edges if tk is None}
+    replace_srcs = {sk for sk, tk in edges if tk is not None}
+    for sk in sorted(withdrawal_srcs & replace_srcs):
+        result["exceptions"].append(
+            {"kind": "CONFLICT", "manifest": "-",
+             "detail": f"{sk} has both a withdrawal and a replacement"})
+
+    # Transitive resolution over replacement edges only.
     nxt = {}
     for sk, tk in edges:
         if tk is not None and sk not in nxt:
             nxt[sk] = tk
+
+    resolved: dict[str, dict] = {}
+    cycle_nodes: set[str] = set()
 
     def terminal(key: str) -> tuple[str, str | None]:
         seen = set()
@@ -267,23 +329,25 @@ def resolve_dir(directory: Path) -> dict:
             cur = nxt[cur]
         return "ACTIVE", cur
 
-    resolved: dict[str, dict] = {}
-    cycle_nodes: set[str] = set()
-    for sk, tk in sorted(nxt.items()):
-        st, end = terminal(tk)
+    for sk in sorted(replace_srcs):
+        st, end = terminal(sk)
         if st == "CYCLE":
             result["exceptions"].append(
                 {"kind": "CYCLE", "manifest": "-",
-                 "detail": f"cycle at {sk} -> ... -> {tk}"})
+                 "detail": f"cycle at {sk} -> ... -> {end}"})
             cycle_nodes.add(sk)
             continue
-        resolved[sk] = {"status": "WITHDRAWN" if tk is None else "SUPERSEDED",
-                        "by": end}
-    for key in sorted(all_nodes - set(resolved)):
-        if key in cycle_nodes:
-            continue
+        resolved[sk] = {"status": "SUPERSEDED", "by": end}
+    for sk in sorted(withdrawal_srcs - replace_srcs):
+        resolved[sk] = {"status": "WITHDRAWN", "by": None}
+    for key in sorted(all_nodes - set(resolved) - cycle_nodes):
         resolved[key] = {"status": "ACTIVE", "by": None}
-    result["artifacts"] = resolved
+
+    # Second fail-closed gate: cycle resolution may add exceptions.
+    if result["exceptions"]:
+        result["artifacts"] = {}
+    else:
+        result["artifacts"] = resolved
 
     return result
 

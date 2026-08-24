@@ -1,10 +1,11 @@
 """Focused stdlib tests for sync_tools.resolve_dir (R1-R7 semantics).
 
-Covers: structural validation, transitive resolution, CONFLICT, CYCLE,
-BROKEN_REF (both directions), R6 absent-supersedes-informational, per-file
-READY gating, R7 authoritative-vs-REQUESTED, the real 0B triple shape
-(two duplicate unpinned artifacts superseded by one pinned manifest), and
-the batch-size supersession shape (same path, old sha -> new sha).
+Covers: canonical path validation (R2), structural validation, transitive
+resolution, CONFLICT, CYCLE, BROKEN_REF both directions, R6 absent-supersedes
+informational, per-file READY gating, R7 authority with REQUIRED publisher +
+operator ratification representation, fail-closed selection (any exception ->
+artifacts == {}), the real 0B triple shape (two duplicate unpinned artifacts
+superseded by one pinned manifest), and same-path overwrite = BROKEN_REF.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ _spec = importlib.util.spec_from_file_location(
     Path(__file__).resolve().parents[1] / "sync_tools.py")
 sync_tools = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sync_tools)
+
+DATE = "2026-08-24T00:00:00Z"
 
 
 def pair(root: Path, rel: str, content: bytes):
@@ -40,6 +43,9 @@ def node_of(ref):
 def manifest(root: Path, name: str, obj, ready: bool = True):
     if not name.startswith("CLOSED_"):
         name = f"CLOSED_{name}"
+    obj.setdefault("schema_version", 1)
+    obj.setdefault("status", "superseded")
+    obj.setdefault("date", DATE)
     blob = json.dumps(obj, indent=2, sort_keys=True).encode("utf-8")
     p = root / name
     p.write_bytes(blob)
@@ -53,12 +59,12 @@ def resolve(root: Path):
     return sync_tools.resolve_dir(root)
 
 
-def statuses(res):
-    return {k: v["status"] for k, v in res["artifacts"].items()}
-
-
 def kinds(res):
     return sorted({e["kind"] for e in res["exceptions"]})
+
+
+def statuses(res):
+    return {k: v["status"] for k, v in res["artifacts"].items()}
 
 
 class SupersessionResolveTests(unittest.TestCase):
@@ -69,110 +75,180 @@ class SupersessionResolveTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_validation_invalid_manifest_is_exception(self):
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def test_invalid_manifest_fails_closed(self):
         pair(self.root, "a.json", b"{}")
         manifest(self.root, "bad.json", {"schema_version": 2})
         res = resolve(self.root)
         self.assertIn("INVALID_MANIFEST", kinds(res))
+        self.assertEqual({}, res["artifacts"])  # fail closed
+
+    def test_root_escape_rejected(self):
+        good = pair(self.root, "safe/new.json", b"NEW")
+        manifest(self.root, "escape.json",
+                 {"from": "n", "reason": "r",
+                  "supersedes": [{"path": "../outside.json",
+                                  "sha256": "a" * 64,
+                                  "publisher": "n"}],
+                  "replacement": good})
+        res = resolve(self.root)
+        self.assertIn("INVALID_MANIFEST", kinds(res))
         self.assertEqual({}, res["artifacts"])
+
+    def test_non_canonical_paths_rejected(self):
+        good = pair(self.root, "safe/new.json", b"NEW")
+        for bad_path in ("sub/../old.json", "./old.json",
+                         "C:/old.json", "old\\old.json"):
+            manifest(self.root, "nc.json",
+                     {"from": "n", "reason": "r",
+                      "supersedes": [{"path": bad_path,
+                                      "sha256": "a" * 64,
+                                      "publisher": "n"}],
+                      "replacement": good})
+            res = resolve(self.root)
+            self.assertIn("INVALID_MANIFEST", kinds(res), bad_path)
+
+    def test_missing_publisher_is_invalid(self):
+        good = pair(self.root, "new.json", b"NEW")
+        old = pair(self.root, "old.json", b"OLD")
+        entry = {"path": old["path"], "sha256": old["sha256"]}  # no publisher
+        manifest(self.root, "nopub.json",
+                 {"from": "n", "reason": "r", "supersedes": [entry],
+                  "replacement": good})
+        res = resolve(self.root)
+        self.assertIn("INVALID_MANIFEST", kinds(res))
+        self.assertEqual({}, res["artifacts"])
+
+    def test_bad_date_and_reason_rejected(self):
+        old = pair(self.root, "o1.json", b"O")
+        new = pair(self.root, "n1.json", b"N")
+        entry = dict(old, publisher="n")
+        manifest(self.root, "c1.json",
+                 {"from": "n", "date": "yesterday", "reason": "r",
+                  "supersedes": [entry], "replacement": new})
+        manifest(self.root, "c2.json",
+                 {"from": "n", "date": DATE, "reason": "",
+                  "supersedes": [entry], "replacement": new})
+        res = resolve(self.root)
+        self.assertEqual(2, len(
+            [e for e in res["exceptions"]
+             if e["kind"] == "INVALID_MANIFEST"]))
+        self.assertEqual({}, res["artifacts"])
+
+    # ------------------------------------------------------------------
+    # Happy paths
+    # ------------------------------------------------------------------
 
     def test_transitive_resolution(self):
         a = pair(self.root, "old_a.json", b"A")
         b = pair(self.root, "mid_b.json", b"B")
         c = pair(self.root, "new_c.json", b"C")
-        m1 = {"schema_version": 1, "status": "superseded", "from": "n1",
-              "date": "2026-08-24T00:00:00Z", "reason": "r1",
-              "supersedes": [a],
-              "replacement": {"path": b["path"], "sha256": b["sha256"]}}
-        m2 = {"schema_version": 1, "status": "superseded", "from": "n1",
-              "date": "2026-08-24T00:00:01Z", "reason": "r2",
-              "supersedes": [b],
-              "replacement": {"path": c["path"], "sha256": c["sha256"]}}
-        manifest(self.root, "m1.json", m1)
-        manifest(self.root, "m2.json", m2)
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(a, publisher="n")],
+                  "replacement": b})
+        manifest(self.root, "m2.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(b, publisher="n")],
+                  "replacement": c})
         res = resolve(self.root)
         st = statuses(res)
-        self.assertEqual(st[node_of(a)], "SUPERSEDED")
-        self.assertEqual(res["artifacts"][node_of(a)]["by"], node_of(c))
-        self.assertEqual(st[node_of(b)], "SUPERSEDED")
-        self.assertEqual(res["exceptions"], [])
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual("SUPERSEDED", st[node_of(a)])
+        self.assertEqual(node_of(c), res["artifacts"][node_of(a)]["by"])
+        self.assertEqual("SUPERSEDED", st[node_of(b)])
+        self.assertEqual("ACTIVE", st[node_of(c)])
 
-    def test_conflict_fails_closed(self):
-        old = pair(self.root, "old.json", b"OLD")
+    def test_withdrawal_without_replacement(self):
+        old = pair(self.root, "old.json", b"O")
+        manifest(self.root, "w.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(old, publisher="n")],
+                  "replacement": None})
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual("WITHDRAWN", statuses(res)[node_of(old)])
+
+    def test_withdrawal_vs_replacement_conflict(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        manifest(self.root, "w.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(old, publisher="n")],
+                  "replacement": None})
+        manifest(self.root, "r.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(old, publisher="n")],
+                  "replacement": new})
+        res = resolve(self.root)
+        self.assertIn("CONFLICT", kinds(res))
+        self.assertEqual({}, res["artifacts"])  # fail closed
+
+    def test_operator_ratified_request_applies(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        entry = dict(old, publisher="someoneElse")
+        manifest(self.root, "req.json",
+                 {"from": "nX", "reason": "r", "supersedes": [entry],
+                  "replacement": new, "operator_ratified": True})
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual("SUPERSEDED", statuses(res)[node_of(old)])
+
+    def test_unratified_cross_node_request_not_applied(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        entry = dict(old, publisher="someoneElse")
+        manifest(self.root, "req.json",
+                 {"from": "nX", "reason": "r", "supersedes": [entry],
+                  "replacement": new})
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual(1, len(res["requested"]))
+        self.assertEqual({}, res["artifacts"])  # fail closed, nothing applied
+
+    # ------------------------------------------------------------------
+    # Fail-closed selection on any exception
+    # ------------------------------------------------------------------
+
+    def test_conflict_selects_nothing(self):
+        old = pair(self.root, "old.json", b"O")
         r1 = pair(self.root, "r1.json", b"R1")
         r2 = pair(self.root, "r2.json", b"R2")
-        # SAME author node issuing two closures with different replacements:
-        # genuinely contradictory, must fail closed.
-        base = {"schema_version": 1, "status": "superseded",
-                "date": "2026-08-24T00:00:00Z", "from": "nA",
-                "supersedes": [old]}
+        base = {"from": "nA", "reason": "r", "supersedes":
+                [dict(old, publisher="nA")]}
         manifest(self.root, "m1.json", {**base, "replacement": r1})
         manifest(self.root, "m2.json", {**base, "replacement": r2})
         res = resolve(self.root)
         self.assertIn("CONFLICT", kinds(res))
+        self.assertEqual({}, res["artifacts"])
 
-    def test_cycle_detected(self):
-        a = pair(self.root, "a.json", b"A")
-        b = pair(self.root, "b.json", b"B")
-        base = {"schema_version": 1, "status": "superseded",
-                "date": "d", "from": "n"}
-        manifest(self.root, "m1.json",
-                 {**base, "supersedes": [a], "replacement": b})
-        manifest(self.root, "m2.json",
-                 {**base, "supersedes": [b], "replacement": a})
-        res = resolve(self.root)
-        self.assertIn("CYCLE", kinds(res))
-
-    def test_broken_replacement_and_supersedes_mismatch(self):
+    def test_broken_supersedes_mismatch_selects_nothing(self):
         old = pair(self.root, "old.json", b"OLD")
         repl = pair(self.root, "repl.json", b"REPL")
         (self.root / "repl.json").write_bytes(b"TAMPERED")
         manifest(self.root, "m1.json",
-                 {"schema_version": 1, "status": "superseded", "from": "n",
-                  "date": "d",
-                  "supersedes": [dict(old, sha256="0" * 64)],
+                 {"from": "n", "reason": "r",
+                  "supersedes": [dict(old, sha256="0" * 64, publisher="n")],
                   "replacement": repl})
         res = resolve(self.root)
         self.assertIn("BROKEN_REF", kinds(res))
+        self.assertEqual({}, res["artifacts"])
 
-    def test_absent_supersedes_is_informational_r6(self):
-        repl = pair(self.root, "new.json", b"NEW")
-        ghost = {"path": "gone/old.json", "sha256": "a" * 64}
+    def test_cycle_selects_nothing(self):
+        a = pair(self.root, "a.json", b"A")
+        b = pair(self.root, "b.json", b"B")
         manifest(self.root, "m1.json",
-                 {"schema_version": 1, "status": "superseded", "from": "n",
-                  "date": "d", "supersedes": [ghost],
-                  "replacement": repl})
+                 {"from": "n", "reason": "r", "supersedes": [dict(a, publisher="n")],
+                  "replacement": b})
+        manifest(self.root, "m2.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(b, publisher="n")],
+                  "replacement": a})
         res = resolve(self.root)
-        self.assertEqual([], res["exceptions"])
-        self.assertEqual(1, len(res["informational"]))
-        self.assertEqual("ACTIVE", statuses(res)[node_of(repl)])
-
-    def test_not_ready_manifest_excluded(self):
-        good = pair(self.root, "x.json", b"X")
-        pair(self.root, "y.json", b"Y")  # stays unreferenced
-        m = {"schema_version": 1, "status": "superseded", "from": "n",
-             "date": "d", "supersedes": [good],
-             "replacement": {"path": "y.json", "sha256": "b" * 64}}
-        manifest(self.root, "stale.json", m, ready=False)
-        res = resolve(self.root)
-        skipped_names = [s.split("/")[-1].split("\\")[-1]
-                         for s in res["skipped_not_ready"]]
-        self.assertTrue(any(n.endswith("stale.json") for n in skipped_names),
-                        skipped_names)
+        self.assertIn("CYCLE", kinds(res))
         self.assertEqual({}, res["artifacts"])
 
-    def test_authority_requested_not_applied(self):
-        old = pair(self.root, "old.json", b"OLD")
-        new = pair(self.root, "new.json", b"NEW")
-        # entry publisher differs from manifest author -> REQUESTED (R7)
-        entry = dict(old, publisher="someoneElse")
-        manifest(self.root, "req.json",
-                 {"schema_version": 1, "status": "superseded", "from": "nX",
-                  "date": "d", "supersedes": [entry], "replacement": new})
-        res = resolve(self.root)
-        self.assertEqual({}, res["artifacts"])
-        self.assertEqual(1, len(res["requested"]))
-        self.assertEqual([], res["exceptions"])
+    # ------------------------------------------------------------------
+    # Real shapes
+    # ------------------------------------------------------------------
 
     def test_0b_triple_two_duplicates_one_pinned(self):
         dup_bytes = b"batch32-eval"
@@ -181,43 +257,84 @@ class SupersessionResolveTests(unittest.TestCase):
         pin = pair(self.root, "eval_rwkv_n36_seed_44_epoch_005.json",
                    b"batch128-eval")
         manifest(self.root, "closure.json",
-                 {"schema_version": 1, "status": "superseded",
-                  "from": "antigravity-ampere", "date": "2026-08-24T15:00:00Z",
+                 {"from": "antigravity-ampere",
                   "reason": "pre-pin evaluations lack recorded settings",
                   "supersedes": [
                       dict(d1, publisher="antigravity-ampere"),
                       dict(d2, publisher="antigravity-ampere")],
                   "replacement": pin})
         res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
         st = statuses(res)
         self.assertEqual("SUPERSEDED", st[node_of(d1)])
         self.assertEqual("SUPERSEDED", st[node_of(d2)])
         self.assertEqual("ACTIVE", st[node_of(pin)])
-        self.assertEqual(node_of(pin), res["artifacts"][node_of(d1)]["by"])
 
-    def test_batch_size_same_path_new_hash(self):
-        old_ref = {"path": "e/eval.json", "sha256": "c" * 64}
-        new = pair(self.root, "e/eval.json", b"batch128-recorded")
+    def test_batch_size_distinct_path_supersession(self):
+        old = pair(self.root, "e/eval_b32.json", b"batch32")
+        new = pair(self.root, "e/eval_b128.json", b"batch128")
         manifest(self.root, "closure.json",
-                 {"schema_version": 1, "status": "superseded", "from": "n",
-                  "date": "d",
-                  "supersedes": [dict(old_ref, publisher="n")],
+                 {"from": "n", "reason": "r",
+                  "supersedes": [dict(old, publisher="n")],
                   "replacement": new})
         res = resolve(self.root)
-        self.assertEqual("SUPERSEDED",
-                         statuses(res)[node_of(old_ref)])
-        self.assertEqual("ACTIVE", statuses(res)[node_of(new)])
+        self.assertEqual([], res["exceptions"])
+        st = statuses(res)
+        self.assertEqual("SUPERSEDED", st[node_of(old)])
+        self.assertEqual("ACTIVE", st[node_of(new)])
+
+    def test_same_path_overwrite_is_broken_ref(self):
+        # Ada's analyzer incident: same path re-published with different
+        # bytes after the sidecar was written -> mismatch, fail closed.
+        old_ref = pair(self.root, "e/eval.json", b"batch32")
+        pair(self.root, "e/eval.json", b"TAMPERED-batch128")
+        manifest(self.root, "closure.json",
+                 {"from": "n", "reason": "r",
+                  "supersedes": [dict(old_ref, publisher="n")],
+                  "replacement": None})
+        res = resolve(self.root)
+        self.assertIn("BROKEN_REF", kinds(res))
+        self.assertEqual({}, res["artifacts"])
+
+    # ------------------------------------------------------------------
+    # Determinism + gating
+    # ------------------------------------------------------------------
 
     def test_deterministic_across_runs(self):
         old = pair(self.root, "old.json", b"O")
         new = pair(self.root, "new.json", b"N")
         manifest(self.root, "CLOSED_c.json",
-                 {"schema_version": 1, "status": "superseded", "from": "n",
-                  "date": "d", "supersedes": [old], "replacement": new})
+                 {"from": "n", "reason": "r", "supersedes": [old],
+                  "replacement": new})
         r1 = resolve(self.root)
         r2 = resolve(self.root)
         self.assertEqual(r1["artifacts"], r2["artifacts"])
         self.assertEqual(r1["exceptions"], r2["exceptions"])
+
+    def test_not_ready_manifest_excluded(self):
+        good = pair(self.root, "x.json", b"X")
+        pair(self.root, "y.json", b"Y")  # stays unreferenced
+        manifest(self.root, "stale.json",
+                 {"from": "n", "reason": "r", "supersedes": [good],
+                  "replacement": {"path": "y.json", "sha256": "b" * 64}},
+                 ready=False)
+        res = resolve(self.root)
+        skipped_names = [s.split("/")[-1].split("\\")[-1]
+                         for s in res["skipped_not_ready"]]
+        self.assertTrue(any(n.endswith("stale.json") for n in skipped_names),
+                        skipped_names)
+        self.assertEqual({}, res["artifacts"])
+
+    def test_absent_supersedes_is_informational_r6(self):
+        repl = pair(self.root, "new.json", b"NEW")
+        ghost = {"path": "gone/old.json", "sha256": "a" * 64, "publisher": "n"}
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r", "supersedes": [ghost],
+                  "replacement": repl})
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual(1, len(res["informational"]))
+        self.assertEqual("ACTIVE", statuses(res)[node_of(repl)])
 
 
 if __name__ == "__main__":
