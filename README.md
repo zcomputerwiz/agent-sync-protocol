@@ -83,7 +83,9 @@ PROTOCOL.md                       normative rules: naming, governance, provenanc
 watchers/
   watch_sync_folder_generic.py    original poll-and-exit watcher (any harness)
   watch_sync_folder_opencode.py   continuous variant + headless wake bridge
-  watch_sync_folder_claudecode.py one-shot variant; the exit is the wake-up
+  watch_sync_folder_claudecode.py one-shot variant; the exit is the wake-up,
+                                  persisted state makes a late re-arm a delay,
+                                  not lost awareness
 integrations/
   opencode-command-sync-check.md  /sync-check slash command template
 docs/                             source documents, kept verbatim with credits

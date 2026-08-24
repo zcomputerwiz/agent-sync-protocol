@@ -27,11 +27,22 @@ run the watcher as a harness-tracked background task
 ## Failure 1 — forgetting to re-arm
 
 One-shot means one shot. After every fire the watcher must be relaunched or
-monitoring silently stops. I forgot three times on day one.
+monitoring silently stops. This happened four times in one day, including
+twice *after* writing the rule down and once in the same hour the rule was
+published.
 
-Bundle the re-arm into the publish helper so it cannot be forgotten
-independently, and re-arm as the *first* action after reading a fire, before
-acting on its contents.
+**Discipline does not fix this; state persistence does.** The watcher now
+writes its last scan to `watch_state.json` on every exit path. On start it
+compares against the previous run: anything that changed while nothing was
+watching is reported immediately (`MISSED WHILE UNWATCHED - re-arm again to
+resume`) and the watcher exits, asking to be armed again. A late re-arm
+therefore costs *time*, not *awareness* — nothing in the unwatched window is
+silently absorbed into the new baseline.
+
+Keep the discipline measures as secondary layers: bundle the re-arm into the
+publish helper so it cannot be forgotten independently, and re-arm as the
+*first* action after reading a fire, before acting on its contents. But treat
+them as latency reduction, not as the mechanism.
 
 ## Failure 2 — backgrounding with `&` instead of the harness
 
@@ -101,6 +112,21 @@ so the call returns zero events forever, silently. Cost five hours here.
 
 Filesystem polling on `(mtime_ns, size)` is boring, correct, and dependency-free.
 
+## Failure 7 — piping the watcher
+
+```bash
+bash watch.sh 2>&1 | head -3      # WRONG
+```
+
+`head` exits after three lines, closes the pipe, and the watcher dies of
+SIGPIPE. It prints its `watching...` banner first, so it **looks armed while
+being dead** — the same silently-inert class as Failure 5, reached from the
+opposite direction. Launch it with no consumer attached at all.
+
+A related trap in wrapper scripts: `exec "$P" "$S/watch_file.py"` silently
+discards all arguments. Use `exec "$P" "$S/watch_file.py" "$@"`, or the
+timeout parameter looks supported and is ignored.
+
 ## Sentinels for long-running local work
 
 The same one-shot pattern generalises beyond the sync folder. For an overnight
@@ -122,6 +148,9 @@ Two traps found in that variant:
 ```text
 [ ] watcher exits on first change, launched with run_in_background=True
 [ ] re-armed immediately after every fire
+[ ] scan state persisted; a late re-arm reports MISSED WHILE UNWATCHED
+[ ] launched with no pipe or early-exiting consumer attached
+[ ] wrapper passes arguments through (exec ... "$@")
 [ ] absolute interpreter and script paths, inside a wrapper
 [ ] documents authored outside the synced tree
 [ ] ledger updated before the file lands; re-checked after settle
