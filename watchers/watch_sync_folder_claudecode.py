@@ -68,6 +68,9 @@ LEDGER = Path(__file__).with_name("authored.txt")
 # Last scan, persisted across runs, so a late re-arm still reports the gap.
 STATE = Path(__file__).with_name("watch_state.json")
 SETTLE_TRIES = 30
+# How long to let a publishing burst finish before reporting a missed window.
+BURST_TRIES = 6
+BURST_SLEEP = 3.0
 SETTLE_SLEEP = 2.0
 POLL = 1.0
 
@@ -145,6 +148,17 @@ def main() -> int:
     base, start = scan(), time.time()
 
     previous = load_state()
+    if previous and any(k not in previous or previous[k] != base[k] for k in base):
+        # Let a burst settle before reporting it. A peer publishing fifteen
+        # artifacts lands them one at a time; reporting the first instantly
+        # produces a fire/re-arm loop that wakes the agent once per file.
+        # Re-scanning until the tree stops moving groups them into one wake-up.
+        for _ in range(BURST_TRIES):
+            time.sleep(BURST_SLEEP)
+            again = scan()
+            if again == base:
+                break
+            base = again
     STATE.write_text(json.dumps(base), encoding="utf-8")
     if previous:
         missed = [Path(k) for k in base
