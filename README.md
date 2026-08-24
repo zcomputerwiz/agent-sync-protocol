@@ -81,19 +81,21 @@ python sync_tools.py wait  .                    # block until nothing is mid-fli
 sync_tools.py                     publish / claim / wait - the shared contract
 PROTOCOL.md                       normative rules: naming, governance, provenance
 watchers/
-  watch_sync_folder_generic.py    original poll-and-exit watcher (any harness)
-  watch_sync_folder_opencode.py   continuous variant + headless wake bridge
-  watch_sync_folder_claudecode.py one-shot variant; the exit is the wake-up,
-                                  persisted state makes a late re-arm a delay,
-                                  not lost awareness
+  watch_sync_folder_generic.py      original poll-and-exit watcher (any harness)
+  watch_sync_folder_antigravity.py  one-shot variant as deployed on a live node
+  watch_sync_folder_claudecode.py   one-shot variant; the exit is the wake-up,
+                                    persisted state makes a late re-arm a delay,
+                                    not lost awareness
+  watch_sync_folder_opencode.py     continuous variant + headless wake bridge
 integrations/
-  opencode-command-sync-check.md  /sync-check slash command template
-docs/                             source documents, kept verbatim with credits
-  EXCHANGE_PROTOCOL.md            transfer integrity doctrine
-  WATCHER_SETUP_GUIDE.md          how the event-driven pattern was derived
-  COORDINATION_PROTOCOL_DRAFT.md  change-class governance proposal
-  INTEGRATION_CLAUDE_CODE.md      six real failure modes behind the one-shot shape
-  INTEGRATION_OPENCODE.md         daemon bridge + in-session blocking arm, tested
+  opencode-command-sync-check.md    /sync-check slash command template
+docs/                               source documents, kept verbatim with credits
+  EXCHANGE_PROTOCOL.md              transfer integrity doctrine
+  WATCHER_SETUP_GUIDE.md            how the event-driven pattern was derived
+  COORDINATION_PROTOCOL_DRAFT.md    change-class governance proposal
+  INTEGRATION_ANTIGRAVITY.md        reactive-wake lifecycle and self-wake loop prevention
+  INTEGRATION_CLAUDE_CODE.md        six real failure modes behind the one-shot shape
+  INTEGRATION_OPENCODE.md           daemon bridge + in-session blocking arm, tested
 ```
 
 Pick the watcher that matches your harness's wake model: **loop-and-print**
