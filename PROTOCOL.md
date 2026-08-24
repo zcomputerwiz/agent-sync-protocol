@@ -41,6 +41,55 @@ Run `python sync_tools.py claim <dir>` before acting on anything:
 Never act on `TRANSFERRING`; never retry `UNVERIFIED` - it is not a transfer
 problem.
 
+### 3.1 Supersession manifests (ratified 2026-08-24, Class C)
+
+One checkpoint may accumulate multiple valid, hash-verified artifacts (e.g.
+pre-pin and pinned evaluations). Published payloads are **immutable**:
+never edit, rename, or delete them. To withdraw or replace one, publish a
+`CLOSED_<topic>_<node>.json` manifest whose own sidecar is written last.
+
+Schema (v1):
+
+```json
+{
+  "schema_version": 1,
+  "status": "superseded",
+  "from": "publishing-node",
+  "date": "RFC3339",
+  "reason": "why the old artifact must not be selected",
+  "supersedes": [
+    {"path": "project/inbox/old.json", "sha256": "<64-hex>",
+     "publisher": "node-that-published-old.json"}
+  ],
+  "replacement": {"path": "project/inbox/new.json",
+                  "sha256": "<64-hex>"} | null
+}
+```
+
+Canonical rules: paths are root-relative, forward-slash, exact-case, NFC;
+hashes are lowercase 64-hex over payload file bytes. `publisher` is optional
+- absent means the manifest author.
+
+**Authority (R7).** A manifest is AUTHORITATIVE only when every supersedes
+entry's publisher matches `from` (absent publisher inherits the author).
+AUTHORITATIVE manifests apply; others are REQUESTED - listed by `resolve`
+but never applied until the publishing node or the operator ratifies.
+
+**Existence asymmetry (R6).** A missing or hash-mismatched *replacement* is
+a BROKEN_REF failure; a missing *supersedes target* is informational only -
+an absent artifact cannot be selected anyway.
+
+**Consumer behavior** (implemented by `sync_tools.py resolve <dir>`):
+
+1. Consider only READY manifests (per-file gating - never claim's exit code).
+2. Validate structure; invalid manifests fail closed (INVALID_MANIFEST).
+3. Verify referenced bytes: replacement missing/mismatched fails closed;
+   supersedes-target mismatch fails closed; supersedes-target absent is
+   informational.
+4. Resolve transitively across replacement chains; detect CONFLICT (two
+   authoritative replacements for one artifact) and CYCLE - both fail closed.
+5. Never infer supersession from mtime, filename similarity, or prose alone.
+
 ## 4. Two hashes, two questions
 
 - **`.sha256` sidecar** answers *"did it arrive intact?"* - changes if any
@@ -64,7 +113,9 @@ problem.
 | `REVIEW_<topic>.md` | review verdicts |
 | `REQUEST_<topic>.md` | open request for any node to pick up |
 | `STOP_READ_FIRST.md` | reserved for run-killing corrections; keep this name sacred |
+| `CLOSED_<topic>.md` | narrative closure notes (human-readable) |
 | `CLOSED_<topic>.md`, `VERIFIED_<topic>.md` | closure markers with final state |
+| `CLOSED_<topic>_<node>.json` | **supersession manifest** - machine-consumed closure selecting which published bytes are authoritative (schema: §3.1) |
 
 Every task/report states From / To / Re / Date, quotes exact instance counts
 and seeds needed for reproduction, and says plainly which node it is wrong
