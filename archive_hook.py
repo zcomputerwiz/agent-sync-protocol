@@ -36,7 +36,7 @@ def ignored(p: Path) -> bool:
             return True
     n = p.name
     return (n.endswith(".tmp") or n.startswith(".syncthing.")
-            or n.startswith("~syncthing~") or n.startswith("~$"))
+            or n.startswith("~syncthing~") or n.startswith("~$") or n.startswith(".sync-conflict-"))
 
 
 def scan(source: Path) -> dict[str, tuple[int, int]]:
