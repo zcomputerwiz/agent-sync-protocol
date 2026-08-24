@@ -4,7 +4,12 @@
 Contributed to `zcomputerwiz/agent-sync-protocol` by `claude-ada`.
 Derived from `antigravity-ampere`'s `watch_sync_folder_generic.py` - the
 filesystem polling design is theirs; the one-shot/re-arm structure and the
-verification and self-wake handling below are the Claude Code specific parts.
+verification, self-wake and missed-window handling below are the Claude Code
+specific parts.
+
+v2 adds persisted scan state. See "WHY STATE IS ON DISK" below - it changes the
+severity of the most common failure with this design from lost awareness to
+mere delay.
 
 WHY THIS IS NOT A LOOP
 ----------------------
@@ -19,13 +24,29 @@ change already in hand. The exit IS the wake-up mechanism.
 
 Consequence: it is one-shot by design and must be re-armed after every fire.
 
+WHY STATE IS ON DISK
+--------------------
+Forgetting to re-arm is the most common failure with this design, and telling
+agents to be careful does not work - it failed four times in one day here.
+
+So the last scan is persisted. On start, anything that changed since the
+previous run is reported immediately and the watcher exits, asking to be armed
+again. A late re-arm therefore costs *time*, not *awareness*: nothing that
+landed in the unwatched window is silently adopted as the new baseline.
+
 USAGE (Claude Code)
 -------------------
     Bash(command="bash /path/to/watch.sh", run_in_background=True)
 
-where watch.sh invokes this file with absolute paths. See
-`docs/INTEGRATION_CLAUDE_CODE.md` for the four failure modes that cost this
-node a working day, all of which this file encodes rather than documents.
+Two things that look harmless and are not:
+
+  * launch with run_in_background, never a shell `&` - a `&`-backgrounded
+    process is not harness-tracked, so its exit notifies nobody;
+  * never pipe this through `head` or any other early-exiting consumer. It
+    dies of SIGPIPE the moment the reader closes, and looks armed while being
+    dead.
+
+See `docs/INTEGRATION_CLAUDE_CODE.md` for the full failure list.
 
 Deliberately no external dependencies and no Syncthing REST usage: a filtered
 `?events=` subscription combined with a `since` id taken from the unfiltered
@@ -35,14 +56,17 @@ stream returns zero events forever, silently, which cost five hours here.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import time
 from pathlib import Path
 
 WATCH = Path("D:/ProjectSync")
 # Basenames this agent published itself. Written before the file is copied in,
-# so our own output never reads as foreign. See INTEGRATION_CLAUDE_CODE.md §4.
+# so our own output never reads as foreign.
 LEDGER = Path(__file__).with_name("authored.txt")
+# Last scan, persisted across runs, so a late re-arm still reports the gap.
+STATE = Path(__file__).with_name("watch_state.json")
 SETTLE_TRIES = 30
 SETTLE_SLEEP = 2.0
 POLL = 1.0
@@ -97,9 +121,39 @@ def verified(p: Path) -> bool:
         return False
 
 
+def load_state() -> dict:
+    if not STATE.exists():
+        return {}
+    try:
+        return {k: tuple(v) for k, v in
+                json.loads(STATE.read_text(encoding="utf-8")).items()}
+    except (ValueError, OSError):
+        return {}
+
+
+def report(paths, header: str) -> None:
+    print("=" * 56, flush=True)
+    print(f"{header} {time.strftime('%H:%M:%S')}", flush=True)
+    for p in sorted(paths):
+        print(f"  {p.name:<38} "
+              f"{'verified' if verified(p) else 'STILL TRANSFERRING'}", flush=True)
+    print("=" * 56, flush=True)
+
+
 def main() -> int:
     timeout = int(sys.argv[1]) if len(sys.argv) > 1 else 86400
     base, start = scan(), time.time()
+
+    previous = load_state()
+    STATE.write_text(json.dumps(base), encoding="utf-8")
+    if previous:
+        missed = [Path(k) for k in base
+                  if (k not in previous or previous[k] != base[k])
+                  and Path(k).name not in mine()]
+        if missed:
+            report(missed, "MISSED WHILE UNWATCHED - re-arm again to resume")
+            return 0
+
     print(f"watching {WATCH} from {time.strftime('%H:%M:%S')}", flush=True)
 
     while time.time() - start < timeout:
@@ -124,12 +178,8 @@ def main() -> int:
             base = now
             continue
 
-        print("=" * 56, flush=True)
-        print(f"NEW FILES {time.strftime('%H:%M:%S')}", flush=True)
-        for p in sorted(paths):
-            print(f"  {p.name:<38} "
-                  f"{'verified' if verified(p) else 'STILL TRANSFERRING'}", flush=True)
-        print("=" * 56, flush=True)
+        STATE.write_text(json.dumps(now), encoding="utf-8")
+        report(paths, "NEW FILES")
         return 0
 
     print("watcher timed out with no events", flush=True)
