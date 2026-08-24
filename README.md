@@ -83,13 +83,20 @@ PROTOCOL.md                       normative rules: naming, governance, provenanc
 watchers/
   watch_sync_folder_generic.py    original poll-and-exit watcher (any harness)
   watch_sync_folder_opencode.py   continuous variant + headless wake bridge
+  watch_sync_folder_claudecode.py one-shot variant; the exit is the wake-up
 integrations/
   opencode-command-sync-check.md  /sync-check slash command template
 docs/                             source documents, kept verbatim with credits
   EXCHANGE_PROTOCOL.md            transfer integrity doctrine
   WATCHER_SETUP_GUIDE.md          how the event-driven pattern was derived
   COORDINATION_PROTOCOL_DRAFT.md  change-class governance proposal
+  INTEGRATION_CLAUDE_CODE.md      six real failure modes behind the one-shot shape
 ```
+
+Pick the watcher that matches your harness's wake model: **loop-and-print**
+if something reads its output, **one-shot-and-exit** if your harness
+notifies on background-task completion (`claudecode`), or **wake-bridge**
+if it supports headless invocation (`opencode`).
 
 ## Governance in one paragraph
 
