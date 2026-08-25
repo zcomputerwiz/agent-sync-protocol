@@ -21,7 +21,6 @@ replacement is a failure).
 """
 import hashlib
 import json
-import os
 import re
 import sys
 import time
@@ -94,22 +93,34 @@ def _node_key(path: str, sha: str) -> str:
     return f"{path}#{sha}"
 
 
-def _payload_matches(directory: Path, rel_path: str, sha: str) -> str:
-    """'match' | 'mismatch' | 'absent' for a (path, sha) reference."""
-    p = directory / rel_path
-    if not p.is_file():
-        return "absent"
-    return "match" if sha256(p) == sha else "mismatch"
+def _payload_state(all_index: dict[str, Path], state_map: dict[str, str],
+                   rel: str, expected_sha: str) -> tuple[str, str | None]:
+    """Exact-case reference check. Returns (state, actual_digest|None).
+
+    states: 'READY' (bytes hash-verified) | 'NONREADY' | 'ABSENT'
+    Exact string keys defeat case-insensitive filesystem matching (R2).
+    """
+    if rel not in all_index:
+        return "ABSENT", None
+    st = state_map.get(rel)
+    if st != "READY":
+        return "NONREADY", None
+    h = hashlib.sha256()
+    with open(all_index[rel], "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    return ("READY", digest) if digest == expected_sha else ("MISMATCH", digest)
 
 
-def _iter_manifest_files(directory: Path, ready_rel: set[str]):
+def _iter_manifest_files(directory: Path, ready_index: dict[str, Path]):
     """Manifest candidates: CLOSED_*.json that are READY (per-file gating).
 
     Arbitrary .json payloads are never parsed as manifests - only the
     reserved CLOSED_ prefix marks selection-critical metadata.
     """
-    for rel in sorted(ready_rel):
-        p = directory / rel
+    for rel in sorted(ready_index):
+        p = ready_index[rel]
         if p.name.startswith("CLOSED_") and rel.lower().endswith(".json"):
             yield rel, p
 
@@ -158,21 +169,26 @@ def resolve_dir(directory: Path) -> dict:
     all_nodes = set()           # every referenced-and-verified node
 
     ready, transferring, unverified = status(directory)
-    ready_rel = {p.relative_to(directory).as_posix() for p in ready}
+    all_index: dict[str, Path] = {}
+    state_map: dict[str, str] = {}
+    for st_val, plist in (("READY", ready), ("TRANSFERRING", transferring),
+                          ("UNVERIFIED", unverified)):
+        for p in plist:
+            rel = p.relative_to(directory).as_posix()
+            all_index[rel] = p
+            state_map[rel] = st_val
     for rel in sorted(
             [p.relative_to(directory).as_posix() for p in transferring]
             + [p.relative_to(directory).as_posix() for p in unverified]):
         if rel.lower().endswith(".json"):
             result["skipped_not_ready"].append(rel)
 
-    json_files = sorted(
-        p for p in directory.rglob("*.json")
-        if p.relative_to(directory).as_posix() in ready_rel)
+    manifest_index = {rel: p for rel, p in all_index.items()
+                      if Path(rel).name.startswith("CLOSED_")
+                      and rel.lower().endswith(".json")}
 
-    for path in json_files:
-        rel = path.relative_to(directory).as_posix()
-        if not (path.name.startswith("CLOSED_")):
-            continue
+    for rel in sorted(manifest_index):
+        path = manifest_index[rel]
         try:
             m = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, OSError) as exc:
@@ -225,22 +241,33 @@ def resolve_dir(directory: Path) -> dict:
         publisher_mismatch = False
         for e in sup:
             pub = e.get("publisher")
-            # R1/R7: publisher is REQUIRED on every entry and must be a
+            # R7: publisher is REQUIRED on every entry and must be a
             # nonempty string. Absent/garbage publisher -> INVALID_MANIFEST.
             if not isinstance(pub, str) or not pub.strip():
                 bad = "supersedes entry missing nonempty 'publisher'"
                 break
+            sha = e.get("sha256")
+            if not isinstance(sha, str) or not HEX64.fullmatch(sha):
+                bad = f"supersedes entry bad sha256: {sha!r}"
+                break
             entries.append({
-                "path": e["path"], "sha256": e["sha256"], "publisher": pub,
+                "path": e["path"], "sha256": sha, "publisher": pub,
             })
             if pub != m["from"]:
                 publisher_mismatch = True
+        if bad is None and repl is not None:
+            rsha = repl.get("sha256")
+            if not isinstance(rsha, str) or not HEX64.fullmatch(rsha):
+                bad = f"replacement bad sha256: {rsha!r}"
         if bad is not None:
             result["exceptions"].append(
                 {"kind": "INVALID_MANIFEST", "manifest": rel, "detail": bad})
             continue
 
-        operator_ratified = m.get("operator_ratified") is True
+        # R7 provenance: only the operator may ratify a cross-node manifest.
+        # A non-operator author's boolean is inert.
+        operator_ratified = (m.get("operator_ratified") is True
+                             and m["from"] == "operator")
         authority = ("AUTHORITATIVE" if not publisher_mismatch
                      else "OPERATOR_RATIFIED" if operator_ratified
                      else "REQUESTED")
@@ -257,29 +284,39 @@ def resolve_dir(directory: Path) -> dict:
             result["requested"].append(meta)
             continue
 
-        # Disk verification and edges apply only to applicable manifests.
+        # Disk verification (exact-case, READY-gated) applies only to
+        # applicable manifests.
         for e in entries:
             key = _node_key(e["path"], e["sha256"])
             src_keys.append(key)
-            where = _payload_matches(directory, e["path"], e["sha256"])
-            if where == "match":
+            st_val, _dg = _payload_state(
+                all_index, state_map, e["path"], e["sha256"])
+            if st_val == "READY":
                 all_nodes.add(key)
-            if where == "mismatch":
+            elif st_val == "MISMATCH":
                 result["exceptions"].append(
                     {"kind": "BROKEN_REF", "manifest": rel,
                      "detail": f"supersedes target bytes mismatch: {key}"})
-            elif where == "absent":
+            elif st_val == "NONREADY":
+                result["exceptions"].append(
+                    {"kind": "BROKEN_REF", "manifest": rel,
+                     "detail": f"supersedes target present but not READY: {key}"})
+            elif st_val == "ABSENT":
                 result["informational"].append(
                     {"manifest": rel, "detail": f"supersedes target absent: {key}"})
         if repl is not None:
             tgt_key = _node_key(repl["path"], repl["sha256"])
-            where = _payload_matches(directory, repl["path"], repl["sha256"])
-            if where == "match":
+            st_val, _dg = _payload_state(
+                all_index, state_map, repl["path"], repl["sha256"])
+            if st_val == "READY":
                 all_nodes.add(tgt_key)
             else:
+                reason = {"MISMATCH": "bytes mismatch",
+                          "NONREADY": "present but not READY",
+                          "ABSENT": "absent"}[st_val]
                 result["exceptions"].append(
                     {"kind": "BROKEN_REF", "manifest": rel,
-                     "detail": f"replacement {where}: {tgt_key}"})
+                     "detail": f"replacement {reason}: {tgt_key}"})
 
         for sk in src_keys:
             edges.append((sk, tgt_key))

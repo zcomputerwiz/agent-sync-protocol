@@ -187,7 +187,7 @@ class SupersessionResolveTests(unittest.TestCase):
         new = pair(self.root, "new.json", b"N")
         entry = dict(old, publisher="someoneElse")
         manifest(self.root, "req.json",
-                 {"from": "nX", "reason": "r", "supersedes": [entry],
+                 {"from": "operator", "reason": "r", "supersedes": [entry],
                   "replacement": new, "operator_ratified": True})
         res = resolve(self.root)
         self.assertEqual([], res["exceptions"])
@@ -300,14 +300,81 @@ class SupersessionResolveTests(unittest.TestCase):
     # Determinism + gating
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Shannon v2 adversarial regressions
+    # ------------------------------------------------------------------
+
+    def test_missing_sha256_is_invalid_not_crash(self):
+        good = pair(self.root, "new.json", b"NEW")
+        old = pair(self.root, "old.json", b"OLD")
+        entry = {"path": old["path"], "publisher": "n"}  # sha256 omitted
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r", "supersedes": [entry],
+                  "replacement": good})
+        res = resolve(self.root)
+        self.assertIn("INVALID_MANIFEST", kinds(res))
+        self.assertEqual({}, res["artifacts"])
+
+    def test_uppercase_and_short_sha_rejected(self):
+        new = pair(self.root, "new.json", b"NEW")
+        for bad in ("A" * 64, "abc"):
+            old_ref = pair(self.root, f"o_{bad[:3]}.json", b"O")
+            manifest(self.root, "c.json",
+                     {"from": "n", "reason": "r",
+                      "supersedes": [dict(old_ref, sha256=bad,
+                                          publisher="n")],
+                      "replacement": new})
+            res = resolve(self.root)
+            self.assertIn("INVALID_MANIFEST", kinds(res), bad)
+            (self.root / "CLOSED_c.json").unlink()
+            (self.root / "CLOSED_c.json.sha256").unlink()
+
+    def test_replacement_without_ready_sidecar_broken_ref(self):
+        old = pair(self.root, "old.json", b"O")
+        (self.root / "new.json").write_bytes(b"NEW")  # no sidecar -> not READY
+        repl = {"path": "new.json", "sha256":
+                hashlib.sha256(b"NEW").hexdigest()}
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r", "supersedes": [dict(old, publisher="n")],
+                  "replacement": repl})
+        res = resolve(self.root)
+        self.assertIn("BROKEN_REF", kinds(res))
+        self.assertEqual({}, res["artifacts"])
+
+    def test_case_mismatched_path_treated_as_absent(self):
+        pair(self.root, "Case/New.json", b"NEW")  # actual case differs
+        ghost = {"path": "case/new.json", "sha256": "a" * 64, "publisher": "n"}
+        repl = {"path": "real/repl.json", "sha256": "b" * 64}  # absent
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r",
+                  "supersedes": [ghost], "replacement": repl})
+        res = resolve(self.root)
+        self.assertIn("BROKEN_REF", kinds(res))  # replacement absent fails
+        details = " ".join(e["detail"] for e in res["exceptions"])
+        self.assertNotIn("case/new.json#", [d for d in []] or details)
+
+    def test_cross_node_self_ratification_is_inert(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        entry = dict(old, publisher="someoneElse")
+        manifest(self.root, "req.json",
+                 {"from": "nX", "reason": "r", "supersedes": [entry],
+                  "replacement": new, "operator_ratified": True})
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual(1, len(res["requested"]))
+        self.assertEqual({}, res["artifacts"])
+
     def test_deterministic_across_runs(self):
         old = pair(self.root, "old.json", b"O")
         new = pair(self.root, "new.json", b"N")
         manifest(self.root, "CLOSED_c.json",
-                 {"from": "n", "reason": "r", "supersedes": [old],
+                 {"from": "n", "reason": "r",
+                  "supersedes": [dict(old, publisher="n")],
                   "replacement": new})
         r1 = resolve(self.root)
         r2 = resolve(self.root)
+        self.assertEqual([], r1["exceptions"])
         self.assertEqual(r1["artifacts"], r2["artifacts"])
         self.assertEqual(r1["exceptions"], r2["exceptions"])
 
