@@ -418,12 +418,14 @@ class SupersessionResolveTests(unittest.TestCase):
         res = resolve(self.root)
         self.assertIn("INVALID_MANIFEST", kinds(res))
         self.assertEqual({}, res["artifacts"])
-        # colon-bearing equivalent stays valid
+        # colon-bearing equivalent stays valid (scope assertions to c3 only;
+        # c2's rejection legitimately appears in the same directory)
         manifest(self.root, "c3.json",
                  {"from": "n", "date": "2026-08-24T00:00:00+00:00",
                   "reason": "r", "supersedes": [entry], "replacement": new})
         res2 = resolve(self.root)
-        self.assertNotIn("INVALID_MANIFEST", kinds(res2))
+        self.assertEqual([], [e for e in res2["exceptions"]
+                              if e["manifest"] == "CLOSED_c3.json"])
 
     def test_absent_supersedes_is_informational_r6(self):
         repl = pair(self.root, "new.json", b"NEW")
