@@ -113,18 +113,6 @@ def _payload_state(all_index: dict[str, Path], state_map: dict[str, str],
     return ("READY", digest) if digest == expected_sha else ("MISMATCH", digest)
 
 
-def _iter_manifest_files(directory: Path, ready_index: dict[str, Path]):
-    """Manifest candidates: CLOSED_*.json that are READY (per-file gating).
-
-    Arbitrary .json payloads are never parsed as manifests - only the
-    reserved CLOSED_ prefix marks selection-critical metadata.
-    """
-    for rel in sorted(ready_index):
-        p = ready_index[rel]
-        if p.name.startswith("CLOSED_") and rel.lower().endswith(".json"):
-            yield rel, p
-
-
 def _canonical_rel_path(raw: str) -> str | None:
     """Return canonical root-relative posix path, or None if invalid (R2).
 
@@ -146,12 +134,20 @@ def _canonical_rel_path(raw: str) -> str | None:
     return "/".join(parts)
 
 
-def _rfc3339(value: str) -> bool:
+def _rfc3339(value) -> bool:
+    """Shape check plus real calendar validation via datetime.fromisoformat."""
     if not isinstance(value, str):
         return False
-    return bool(re.match(
-        r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?"
-        r"([Zz]|[+-]\d{2}:\d{2})$", value))
+    if not re.match(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}"
+                    r"(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})$", value):
+        return False
+    try:
+        from datetime import datetime
+        datetime.fromisoformat(
+            value.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def resolve_dir(directory: Path) -> dict:
@@ -183,8 +179,11 @@ def resolve_dir(directory: Path) -> dict:
         if rel.lower().endswith(".json"):
             result["skipped_not_ready"].append(rel)
 
+    # Only READY CLOSED_*.json files are manifest candidates (P1 fix: a
+    # non-READY closure must be skipped, never parsed and applied).
     manifest_index = {rel: p for rel, p in all_index.items()
-                      if Path(rel).name.startswith("CLOSED_")
+                      if state_map[rel] == "READY"
+                      and Path(rel).name.startswith("CLOSED_")
                       and rel.lower().endswith(".json")}
 
     for rel in sorted(manifest_index):

@@ -382,14 +382,29 @@ class SupersessionResolveTests(unittest.TestCase):
         good = pair(self.root, "x.json", b"X")
         pair(self.root, "y.json", b"Y")  # stays unreferenced
         manifest(self.root, "stale.json",
-                 {"from": "n", "reason": "r", "supersedes": [good],
-                  "replacement": {"path": "y.json", "sha256": "b" * 64}},
+                 {"from": "n", "reason": "r",
+                  "supersedes": [dict(good, publisher="n")],
+                  "replacement": {"path": "y.json", "sha256":
+                                  hashlib.sha256(b"Y").hexdigest()}},
                  ready=False)
         res = resolve(self.root)
         skipped_names = [s.split("/")[-1].split("\\")[-1]
                          for s in res["skipped_not_ready"]]
         self.assertTrue(any(n.endswith("stale.json") for n in skipped_names),
                         skipped_names)
+        # P1: a skipped (non-READY) manifest must not be parsed or applied.
+        self.assertEqual([], res["manifests"])
+        self.assertEqual({}, res["artifacts"])
+
+    def test_impossible_rfc3339_rejected(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        entry = dict(old, publisher="n")
+        manifest(self.root, "c1.json",
+                 {"from": "n", "date": "2026-99-99T99:99:99Z", "reason": "r",
+                  "supersedes": [entry], "replacement": new})
+        res = resolve(self.root)
+        self.assertIn("INVALID_MANIFEST", kinds(res))
         self.assertEqual({}, res["artifacts"])
 
     def test_absent_supersedes_is_informational_r6(self):
