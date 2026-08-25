@@ -407,6 +407,24 @@ class SupersessionResolveTests(unittest.TestCase):
         self.assertIn("INVALID_MANIFEST", kinds(res))
         self.assertEqual({}, res["artifacts"])
 
+    def test_numeric_offset_without_colon_rejected(self):
+        old = pair(self.root, "old.json", b"O")
+        new = pair(self.root, "new.json", b"N")
+        entry = dict(old, publisher="n")
+        # RFC3339 5.6: time-numoffset requires the colon; +0000 is invalid.
+        manifest(self.root, "c2.json",
+                 {"from": "n", "date": "2026-08-24T00:00:00+0000",
+                  "reason": "r", "supersedes": [entry], "replacement": new})
+        res = resolve(self.root)
+        self.assertIn("INVALID_MANIFEST", kinds(res))
+        self.assertEqual({}, res["artifacts"])
+        # colon-bearing equivalent stays valid
+        manifest(self.root, "c3.json",
+                 {"from": "n", "date": "2026-08-24T00:00:00+00:00",
+                  "reason": "r", "supersedes": [entry], "replacement": new})
+        res2 = resolve(self.root)
+        self.assertNotIn("INVALID_MANIFEST", kinds(res2))
+
     def test_absent_supersedes_is_informational_r6(self):
         repl = pair(self.root, "new.json", b"NEW")
         ghost = {"path": "gone/old.json", "sha256": "a" * 64, "publisher": "n"}

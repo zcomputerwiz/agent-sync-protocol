@@ -139,7 +139,7 @@ def _rfc3339(value) -> bool:
     if not isinstance(value, str):
         return False
     if not re.match(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}"
-                    r"(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})$", value):
+                    r"(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$", value):
         return False
     try:
         from datetime import datetime
