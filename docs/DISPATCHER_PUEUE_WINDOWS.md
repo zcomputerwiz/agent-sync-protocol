@@ -30,48 +30,49 @@ Malformed or UNVERIFIED payloads cannot cause local execution, because the
 queue consumes only commands an agent explicitly constructed after
 verification.
 
-## Release source and version pinning (Phase 2 preflight)
+## Release pinning (v4.0.4)
 
-1. Official source only: `https://github.com/Nukesor/pueue/releases`
-   (asset `pueue-win-x86_64-<version>.zip` naming per release).
-2. Pin by tag. Record in this file, in an ops note, before extraction:
+Pinned release: **v4.0.4**. Official source only:
+`https://github.com/Nukesor/pueue/releases/tag/v4.0.4`
 
-   ```text
-   pinned tag        : <e.g. v4.x.y>
-   archive sha256    : <computed locally over the downloaded zip>
-   download date/url : <...>
-   ```
+The Windows release ships two separate executables (not a zip), each with a
+GitHub-published SHA-256 digest. Pin both; Phase 2 must compare the
+downloaded files against these upstream digests AND record locally computed
+values:
 
-3. Verify: `Get-FileHash <zip> -Algorithm SHA256` must equal the recorded
-   value. Upstream may publish checksum assets; if present, require BOTH to
-   agree. If they disagree, stop and escalate to the operator.
-4. Record the pinned build's `pueued --help` output alongside the record;
-   service-management flags are verified against the pinned build, not
-   assumed from documentation.
+```text
+pueue-x86_64-pc-windows-msvc.exe
+  https://github.com/Nukesor/pueue/releases/download/v4.0.4/pueue-x86_64-pc-windows-msvc.exe
+  sha256 28b0756d54ec16ce13d78b251d086aa62e0057089cb27f793cd649f9762b996a
+
+pueued-x86_64-pc-windows-msvc.exe
+  https://github.com/Nukesor/pueue/releases/download/v4.0.4/pueued-x86_64-pc-windows-msvc.exe
+  sha256 aafa05e2f26cda9aff3eeb9be261e8f9f67752d1e9bb7fbcb47318e35c52ab1d
+```
+
+A locally computed digest recorded after download is not an authenticity pin
+by itself; agreement with the release-published value is required before
+installation. Also record the pinned build's `pueued --help` output
+alongside this table.
 
 ## Service installation (Phase 2)
 
-Native service support varies by release; the pinned build's help output is
-authoritative. Two accepted patterns, in order of preference:
+Use Pueue 4.0+'s **native Windows service support only**. Registering a
+console daemon directly with the SCM fails with Error 1053 - the process
+does not implement the Windows service protocol (upstream issue
+Nukesor/pueue#344). Generic `sc.exe create` wrappers are not an option here.
 
 ```powershell
-# A. If the pinned build ships native service management:
-pueued --help                      # confirm the service subcommand exists
-pueued <native-install-command>
-
-# B. Generic Windows service wrapper (works for any console daemon):
-sc.exe create pueued binPath= "\"<installDir>\pueued.exe\" --config \"<configDir>\"" ^
-    start= auto DisplayName= "Pueue task queue daemon"
-sc.exe description pueued "Machine-local persistent task queue (agent-sync-protocol)"
+pueued [-c <config>] [-p <profile>] service install
+pueued service start
+pueued service status        # if present in the pinned build; else sc query
+pueued service stop
+pueued service uninstall
 ```
 
-Status / start / stop:
-
-```powershell
-sc.exe query pueued
-sc.exe start pueued
-sc.exe stop pueued          # graceful: in-flight tasks finish first
-```
+Phase 2 must empirically verify stop semantics (whether in-flight tasks
+drain or are killed on `service stop`) before relying on either behavior,
+and verify restart persistence of queue state, logs, and exit codes.
 
 Service identity assumption: run as the interactive user account that owns
 `D:\` workspaces and the queue-data directory (LocalSystem would need
@@ -84,12 +85,14 @@ Uninstall / rollback:
 pueue pause --all                 # or per group; let tasks drain
 pueue kill <id>                   # deliberate cancel if needed
 # retain: pueue log exports and the queue-state directory
-sc.exe stop pueued
-sc.exe delete pueued
+pueued service stop
+pueued service uninstall
 # delete pinned binaries and queue state only after paths are re-verified
 ```
 
 Repository launchers are inert checked-in scripts and revert independently.
+Do not promise graceful-stop semantics without the Phase 2 empirical check
+above.
 
 ## Queue policy
 
