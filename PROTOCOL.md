@@ -79,9 +79,11 @@ demotes the manifest to REQUESTED. A REQUESTED manifest applies only when it
 carries `"operator_ratified": true`, in which case it is applied and tagged
 OPERATOR_RATIFIED in resolver output.
 
-**Existence asymmetry (R6).** A missing or hash-mismatched *replacement* is
-a BROKEN_REF failure; a missing *supersedes target* is informational only -
-an absent artifact cannot be selected anyway.
+**Existence asymmetry (R6).** A missing, NONREADY, or hash-mismatched
+*replacement* is a BROKEN_REF failure. A missing or NONREADY *supersedes
+target* is informational only - an unavailable historical artifact cannot be
+selected anyway. A READY supersedes target whose bytes do not match its
+declared hash remains a BROKEN_REF failure.
 
 **Fail-closed selection.** Any exception - INVALID_MANIFEST, CONFLICT,
 CYCLE, BROKEN_REF - means NOTHING is selected: `resolve` reports the
@@ -92,9 +94,9 @@ never mixed in one output.
 
 1. Consider only READY manifests (per-file gating - never claim's exit code).
 2. Validate structure and canonical paths; invalid manifests fail closed.
-3. Verify referenced bytes: replacement missing/mismatched fails closed;
-   supersedes-target mismatch fails closed; supersedes-target absent is
-   informational.
+3. Verify referenced bytes: replacement missing/NONREADY/mismatched fails
+   closed; supersedes-target mismatch fails closed; supersedes-target
+   missing/NONREADY is informational.
 4. Resolve transitively across replacement chains; detect CONFLICT (two
    authoritative replacements for one artifact), withdrawal-vs-replacement
    conflicts, and CYCLE - all fail closed.

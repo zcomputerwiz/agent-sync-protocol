@@ -1,11 +1,12 @@
 """Focused stdlib tests for sync_tools.resolve_dir (R1-R7 semantics).
 
 Covers: canonical path validation (R2), structural validation, transitive
-resolution, CONFLICT, CYCLE, BROKEN_REF both directions, R6 absent-supersedes
-informational, per-file READY gating, R7 authority with REQUIRED publisher +
-operator ratification representation, fail-closed selection (any exception ->
-artifacts == {}), the real 0B triple shape (two duplicate unpinned artifacts
-superseded by one pinned manifest), and same-path overwrite = BROKEN_REF.
+resolution, CONFLICT, CYCLE, BROKEN_REF both directions, R6 unavailable-
+supersedes informational, per-file READY gating, R7 authority with REQUIRED
+publisher + operator ratification representation, fail-closed selection (any
+exception -> artifacts == {}), the real 0B triple shape (two duplicate unpinned
+artifacts superseded by one pinned manifest), and same-path overwrite =
+BROKEN_REF.
 """
 
 from __future__ import annotations
@@ -436,6 +437,23 @@ class SupersessionResolveTests(unittest.TestCase):
         res = resolve(self.root)
         self.assertEqual([], res["exceptions"])
         self.assertEqual(1, len(res["informational"]))
+        self.assertEqual("ACTIVE", statuses(res)[node_of(repl)])
+
+    def test_nonready_supersedes_is_informational_r6(self):
+        old_bytes = b"OLD"
+        (self.root / "old.json").write_bytes(old_bytes)  # no sidecar
+        old = {"path": "old.json",
+               "sha256": hashlib.sha256(old_bytes).hexdigest(),
+               "publisher": "n"}
+        repl = pair(self.root, "new.json", b"NEW")
+        manifest(self.root, "m1.json",
+                 {"from": "n", "reason": "r", "supersedes": [old],
+                  "replacement": repl})
+
+        res = resolve(self.root)
+        self.assertEqual([], res["exceptions"])
+        self.assertEqual(1, len(res["informational"]))
+        self.assertEqual("SUPERSEDED", statuses(res)[node_of(old)])
         self.assertEqual("ACTIVE", statuses(res)[node_of(repl)])
 
 
