@@ -123,7 +123,7 @@ environment API, and enqueue only after both operations succeed:
 
 ```powershell
 # submit (agent side, after payload verification)
-$repo = 'D:\CodexShannon\rwkv-rosa-compute'
+$repo = 'D:\GitHub\rwkv-rosa-compute'
 $launcher = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass' +
   ' -File "' + $repo + '\scripts\pueue_wrap.ps1"' +
   ' -RepoRoot "' + $repo + '"'
