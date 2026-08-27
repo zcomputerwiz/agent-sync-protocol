@@ -1,16 +1,16 @@
 # Machine dispatcher: Pueue on Windows
 
 Status: Phase 1 (documentation + launchers) implemented; service activation is
-Phase 2 and waits for the current GPU runner. Ratification: see
+a separate Phase 2 operation and has not been performed. Ratification: see
 `PROPOSAL_PUEUE_MACHINE_TASK_DISPATCHER_SHANNON.md` and the task thread.
 
 ## Purpose
 
 A persistent machine-local queue separates submitted jobs from interactive
 agent applications. When an agent application dies mid-run (the MSIX
-termination incident of 2026-08-25), a queued job keeps running under the
-daemon's process tree, with durable queue state, retained logs, and exit
-codes. The shared folder remains the cross-machine control plane; Pueue is
+termination incident of 2026-08-25), a queued job remains under the daemon's
+process tree. This protects jobs from agent-app exits, but not from user logoff
+or reboot. The shared folder remains the cross-machine control plane; Pueue is
 node-local execution only.
 
 ## Trust boundary (non-negotiable)
@@ -65,25 +65,29 @@ Nukesor/pueue#344). Generic `sc.exe create` wrappers are not an option here.
 ```powershell
 pueued [-c <config>] [-p <profile>] service install
 pueued service start
-pueued service status        # if present in the pinned build; else sc query
+Get-Service -Name pueued     # v4.0.4 has no `service status` subcommand
+# or: sc.exe query pueued
 pueued service stop
 pueued service uninstall
 ```
 
-Phase 2 must empirically verify stop semantics (whether in-flight tasks
-drain or are killed on `service stop`) before relying on either behavior,
-and verify restart persistence of queue state, logs, and exit codes.
+Run installation commands from an elevated shell. Pueue installs a LocalSystem
+SCM wrapper which launches `pueued` with the active interactive user's token.
+Do not change the service account to the interactive user. Repository and queue
+paths must be accessible to that active user; granting workspace access to
+LocalSystem is neither necessary nor the supported runtime model.
 
-Service identity assumption: run as the interactive user account that owns
-`D:\` workspaces and the queue-data directory (LocalSystem would need
-explicit ACL grants). Confirm read/write scope covers ONLY the required
-workspaces and the queue-data directory before starting real jobs.
+Windows terminates the user-side daemon and its tasks when that user logs off.
+Phase 2 must therefore test service stop, user logoff/logon, and reboot behavior
+before making any persistence claim. The supported guarantee at this phase is
+only independence from the submitting agent application.
 
 Uninstall / rollback:
 
 ```powershell
-pueue pause --all                 # or per group; let tasks drain
-pueue kill <id>                   # deliberate cancel if needed
+# stop submitting new work, then choose one path for every running task:
+pueue wait <id>                   # deliberate drain
+# or: pueue kill <id>             # deliberate cancel
 # retain: pueue log exports and the queue-state directory
 pueued service stop
 pueued service uninstall
@@ -107,12 +111,29 @@ The Pueue task ID is the stable operational handle; quote it in
 
 ## Procedures
 
+The target machine's Windows PowerShell policy may reject `-File`. The launcher
+command therefore uses the explicit process-only `-ExecutionPolicy Bypass`
+override. This does not modify user or machine policy; it is acceptable only
+because the agent submits a checked-in launcher after verifying the task.
+
+Pueue reconstructs task commands for execution by a shell. Passing the launcher
+and JSON as separate `pueue add` arguments loses protective quoting. Submit one
+complete launcher command in a stashed task, set the JSON through Pueue's task
+environment API, and enqueue only after both operations succeed:
+
 ```powershell
 # submit (agent side, after payload verification)
-pueue add --group cpu -- powershell -NoProfile -File `
-  D:\OpenCode\rwkv-rosa-compute\scripts\pueue_wrap.ps1 `
-  -RepoRoot D:\OpenCode\rwkv-rosa-compute `
-  -ArgsJson '["python","-u","scripts\\some_task.py","--flag","value"]'
+$repo = 'D:\CodexShannon\rwkv-rosa-compute'
+$launcher = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass' +
+  ' -File "' + $repo + '\scripts\pueue_wrap.ps1"' +
+  ' -RepoRoot "' + $repo + '"'
+$taskJson = @('python', '-u', 'scripts\some_task.py', '--flag', 'value') |
+  ConvertTo-Json -Compress
+
+# The task cannot start before its environment is attached.
+$taskId = pueue add --group cpu --stashed --print-task-id $launcher
+pueue env set $taskId PUEUE_TASK_JSON $taskJson
+pueue enqueue $taskId
 
 # machine-readable state
 pueue status --json
@@ -126,11 +147,9 @@ pueue wait <id>
 # cancel a queued/running task
 pueue kill <id>
 
-# restart persistence
-# queue state lives in the daemon's data directory; stopping and starting
-# the service retains finished-task records, logs, and exit codes. Verify
-# once in Phase 2: submit, reboot or restart service, confirm `status --json`
-# and `log` unchanged.
+# Phase 2 persistence test (not a current guarantee): record status/log,
+# restart the service, log off/on, and reboot in separate trials; compare
+# task state, logs, exit codes, and whether an in-flight process survived.
 ```
 
 ## Environment contract
