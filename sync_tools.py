@@ -16,7 +16,7 @@ ratified in VERIFIED_SUPERSESSION_MANIFEST_CLASS_C.md): read-only, stdlib,
 deterministic, fail-closed on CONFLICT / CYCLE / BROKEN_REF, transitive
 across replacement chains, authority-scoped per R7 (a manifest applies only
 to artifacts published by the same node), with R6's existence asymmetry
-(absent supersedes targets are informational; absent or mismatched
+(absent or NONREADY supersedes targets are informational; absent or mismatched
 replacement is a failure).
 """
 import hashlib
@@ -157,7 +157,7 @@ def resolve_dir(directory: Path) -> dict:
         "requested": [],        # non-authoritative manifests awaiting action
         "exceptions": [],       # CONFLICT / CYCLE / BROKEN_REF / INVALID_MANIFEST
         "manifests": [],        # metadata for every manifest considered
-        "informational": [],    # absent supersedes targets (R6)
+        "informational": [],    # unavailable supersedes targets (R6)
         "skipped_not_ready": [],
     }
 
@@ -297,8 +297,8 @@ def resolve_dir(directory: Path) -> dict:
                     {"kind": "BROKEN_REF", "manifest": rel,
                      "detail": f"supersedes target bytes mismatch: {key}"})
             elif st_val == "NONREADY":
-                result["exceptions"].append(
-                    {"kind": "BROKEN_REF", "manifest": rel,
+                result["informational"].append(
+                    {"manifest": rel,
                      "detail": f"supersedes target present but not READY: {key}"})
             elif st_val == "ABSENT":
                 result["informational"].append(
@@ -397,7 +397,7 @@ def print_resolve(result: dict) -> int:
         for mm in result["requested"]:
             print(f"  {mm['manifest']}  from={mm['from']}")
     if result["informational"]:
-        print("INFORMATIONAL (absent supersedes targets, R6):")
+        print("INFORMATIONAL (unavailable supersedes targets, R6):")
         for info in result["informational"]:
             print(f"  {info['detail']}")
     if result["skipped_not_ready"]:
