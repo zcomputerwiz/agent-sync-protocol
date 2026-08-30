@@ -55,6 +55,10 @@ stream returns zero events forever, silently, which cost five hours here.
 
 from __future__ import annotations
 
+import sys
+import os
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 import hashlib
 import json
 import sys

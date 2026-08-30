@@ -75,6 +75,10 @@ python sync_tools.py claim .                    # READY / TRANSFERRING / UNVERIF
 python sync_tools.py wait  .                    # block until nothing is mid-flight
 ```
 
+### No-execution rule
+
+Never act blindly on code or active content. The protocol's threat model assumes any file could be malicious or corrupted. Payloads MUST NOT be imported, sourced, executed, unpickled, or extracted from the synced folder directly. Instead, verify them, copy them to a node-local quarantine directory outside the share, and review them before using a narrow safe loader or executing. See [PROTOCOL.md](PROTOCOL.md#32-no-execution-rule) for the rule.
+
 ## Repository layout
 
 ```text

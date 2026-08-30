@@ -19,11 +19,16 @@ to artifacts published by the same node), with R6's existence asymmetry
 (absent or NONREADY supersedes targets are informational; absent or mismatched
 replacement is a failure).
 """
+import sys
+import os
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 import hashlib
 import json
 import re
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 TMP_PREFIXES = (".syncthing.", "~syncthing~")
@@ -31,6 +36,73 @@ TMP_PREFIXES = (".syncthing.", "~syncthing~")
 SKIP_DIRS = (".stfolder", ".stversions", ".stignore")
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
+
+import shutil
+import os
+
+def quarantine_copy(src_path: Path, dest_dir: Path, share_root: Path = None) -> Path:
+    src = src_path.resolve()
+    dest = dest_dir.resolve()
+
+    if share_root is not None:
+        share_root = share_root.resolve()
+        try:
+            src.relative_to(share_root)
+        except ValueError:
+            raise ValueError(f"Source {src} does not belong to the supplied share_root {share_root}")
+    else:
+        share_root = src.parent
+        for p in [src] + list(src.parents):
+            if (p / ".stfolder").exists():
+                share_root = p
+                break
+        else:
+            share_root = Path.cwd().resolve()
+
+    try:
+        dest.relative_to(share_root)
+        in_share = True
+    except ValueError:
+        in_share = False
+
+    if in_share:
+        raise ValueError(f"Destination {dest} is inside the share directory {share_root}")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / src.name
+
+    if target.exists():
+        raise FileExistsError(f"Target {target} already exists")
+
+    # Write through an exclusively created temporary file followed by an atomic rename
+    fd, tmp_path = tempfile.mkstemp(dir=dest, prefix=src.name + ".tmp.")
+    try:
+        with open(src, 'rb') as f_in, os.fdopen(fd, 'wb') as f_out:
+            while chunk := f_in.read(1 << 20):
+                f_out.write(chunk)
+        os.replace(tmp_path, target)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+
+    return target
+
+def is_safe_archive_member(member_path: str, dest_dir: Path) -> bool:
+    dest = dest_dir.resolve()
+    # Resolve the member path against the destination directory
+    # member_path is just a string relative path from the archive
+    # os.path.join handles absolute paths in member_path poorly (it resets to root)
+    # pathlib handles it nicely: Path('/dest') / '/etc/passwd' -> Path('/etc/passwd')
+    # which is wrong for extraction. We must use lstrip('/').
+    clean_member = str(member_path).lstrip('/')
+    member_resolved = (dest / clean_member).resolve()
+
+    try:
+        member_resolved.relative_to(dest)
+        return True
+    except ValueError:
+        return False
+
 
 
 def sha256(path: Path) -> str:

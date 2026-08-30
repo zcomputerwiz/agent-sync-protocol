@@ -48,6 +48,25 @@ pre-pin and pinned evaluations). Published payloads are **immutable**:
 never edit, rename, or delete them. To withdraw or replace one, publish a
 `CLOSED_<topic>_<node>.json` manifest whose own sidecar is written last.
 
+### 3.2 No-execution rule
+
+Safety is determined by the operation, not by an extension blacklist. Code,
+native binaries, shell and module files, archives, documents with active
+content, and object-bearing serialized formats (.pt, .pth, .pkl, NumPy object
+arrays) MUST NOT be imported, sourced, executed, unpickled, or extracted from
+the synced folder. To use one:
+
+1. verify it is READY
+2. copy it to a node-local quarantine directory OUTSIDE the share
+3. review it
+4. use the narrowest safe loader on the local copy: data-only or
+   weights-only modes where available, and path-containment checks before
+   any archive extraction
+5. execute or deserialize only after that local review succeeds
+
+Every wrapper or harness that touches the folder MUST set
+`PYTHONDONTWRITEBYTECODE=1`.
+
 Schema (v1):
 
 ```json
