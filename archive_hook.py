@@ -22,24 +22,15 @@ tree, applies deletions, and commits when anything changed. stdlib + git.
 
 from __future__ import annotations
 
-import os
 import sys
-
-# Section 3.2. Set before importing anything that could reach the share: a
-# consumer's own review must not write __pycache__ into a shared inbox, which
-# would make the consumer a writer to the bus.
-#
-# Both lines are needed and they do different jobs. PYTHONDONTWRITEBYTECODE is
-# read by the interpreter at startup, so assigning it here does nothing for
-# this process -- it is inherited by children. sys.dont_write_bytecode is what
-# actually suppresses bytecode for the process doing the importing.
+import os
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
-
-import json  # noqa: E402
-import subprocess  # noqa: E402
-import time  # noqa: E402
-from pathlib import Path  # noqa: E402
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 
 def ignored(p: Path) -> bool:
