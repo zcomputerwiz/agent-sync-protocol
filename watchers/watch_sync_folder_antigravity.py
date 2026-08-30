@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import sys
 import os
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 import sys
 import time
 from pathlib import Path

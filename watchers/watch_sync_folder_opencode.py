@@ -12,7 +12,10 @@ Deployed by opencode-dijkstra per D:\\ProjectSync\\WATCHER_SETUP_GUIDE.md
 
 from __future__ import annotations
 
+import sys
 import os
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 import subprocess
 import sys
 import time

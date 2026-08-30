@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Run tests
+      run: python -m unittest discover -s tests -p "test_*.py"
+
+    - name: Compile files
+      run: python -m py_compile sync_tools.py archive_hook.py watchers/watch_sync_folder_antigravity.py watchers/watch_sync_folder_claudecode.py watchers/watch_sync_folder_generic.py watchers/watch_sync_folder_opencode.py

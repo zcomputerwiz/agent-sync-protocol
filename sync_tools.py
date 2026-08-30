@@ -32,6 +32,60 @@ SKIP_DIRS = (".stfolder", ".stversions", ".stignore")
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
+import shutil
+import os
+
+def quarantine_copy(src_path: Path, dest_dir: Path) -> Path:
+    src = src_path.resolve()
+    dest = dest_dir.resolve()
+
+    # Refuse to copy to a destination inside the share.
+    # The share is the root of the repo (or where the user runs it from), but typically
+    # the src_path is inside the share. We can find the share root by looking for .stfolder,
+    # but a generic robust way is checking if dest is a subpath of the directory containing src_path,
+    # but that doesn't cover if they copy to a sibling dir in the share.
+    # Actually, a simple approach: find the share root by looking for .stfolder upwards from src.
+    # If not found, use the current working directory as the share root.
+    share_root = src.parent
+    for p in [src] + list(src.parents):
+        if (p / ".stfolder").exists():
+            share_root = p
+            break
+    else:
+        # Fallback to cwd if no .stfolder
+        share_root = Path.cwd().resolve()
+
+    try:
+        dest.relative_to(share_root)
+        in_share = True
+    except ValueError:
+        in_share = False
+
+    if in_share:
+        raise ValueError(f"Destination {dest} is inside the share directory {share_root}")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / src.name
+    shutil.copy2(src, target)
+    return target
+
+def is_safe_archive_member(member_path: str, dest_dir: Path) -> bool:
+    dest = dest_dir.resolve()
+    # Resolve the member path against the destination directory
+    # member_path is just a string relative path from the archive
+    # os.path.join handles absolute paths in member_path poorly (it resets to root)
+    # pathlib handles it nicely: Path('/dest') / '/etc/passwd' -> Path('/etc/passwd')
+    # which is wrong for extraction. We must use lstrip('/').
+    clean_member = str(member_path).lstrip('/')
+    member_resolved = (dest / clean_member).resolve()
+
+    try:
+        member_resolved.relative_to(dest)
+        return True
+    except ValueError:
+        return False
+
+
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()

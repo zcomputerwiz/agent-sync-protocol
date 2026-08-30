@@ -22,8 +22,11 @@ tree, applies deletions, and commits when anything changed. stdlib + git.
 
 from __future__ import annotations
 
-import json
+import sys
 import os
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
+import json
 import subprocess
 import sys
 import time
