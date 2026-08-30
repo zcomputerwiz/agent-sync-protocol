@@ -32,59 +32,109 @@ SKIP_DIRS = (".stfolder", ".stversions", ".stignore")
 
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
-import shutil
 import os
+import shutil
 
-def quarantine_copy(src_path: Path, dest_dir: Path) -> Path:
-    src = src_path.resolve()
-    dest = dest_dir.resolve()
 
-    # Refuse to copy to a destination inside the share.
-    # The share is the root of the repo (or where the user runs it from), but typically
-    # the src_path is inside the share. We can find the share root by looking for .stfolder,
-    # but a generic robust way is checking if dest is a subpath of the directory containing src_path,
-    # but that doesn't cover if they copy to a sibling dir in the share.
-    # Actually, a simple approach: find the share root by looking for .stfolder upwards from src.
-    # If not found, use the current working directory as the share root.
-    share_root = src.parent
-    for p in [src] + list(src.parents):
-        if (p / ".stfolder").exists():
-            share_root = p
-            break
+def find_share_root(path: Path) -> Path | None:
+    """The Syncthing folder containing ``path``, or None if it is not in one.
+
+    Located by the ``.stfolder`` marker Syncthing places at a folder's root.
+    Returning None rather than guessing is deliberate: every caller here uses
+    this to decide whether a destination is inside the share, and a guess that
+    is wrong in the permissive direction turns a containment check into no
+    check at all.
+    """
+    resolved = path.resolve()
+    for candidate in [resolved] + list(resolved.parents):
+        if (candidate / ".stfolder").is_dir():
+            return candidate
+    return None
+
+
+def quarantine_copy(src_path: Path, dest_dir: Path,
+                    share_root: Path | None = None) -> Path:
+    """Copy a verified payload out of the share, into a node-local directory.
+
+    Section 3.2: nothing from the synced folder is imported, executed, or
+    deserialised in place. It is copied out, reviewed locally, and only then
+    used. This helper is the copy-out step, and its whole job is to guarantee
+    the destination is not itself inside the share -- copying from one part of
+    the share to another would satisfy the letter of the rule and none of it.
+
+    ``share_root`` may be passed explicitly. When it is not, the share is
+    located from ``src_path`` via ``.stfolder``, and if no share can be found
+    the copy is REFUSED rather than allowed. An earlier version fell back to
+    the current working directory, which silently reduced the containment check
+    to "is the destination under wherever this happened to be run from" -- a
+    check that passes for almost any destination, including one inside the
+    share. A guard that cannot determine its boundary must not pretend it has
+    one.
+    """
+    src = Path(src_path).resolve()
+    dest = Path(dest_dir).resolve()
+
+    if share_root is None:
+        share_root = find_share_root(src)
+        if share_root is None:
+            raise ValueError(
+                f"cannot locate the share root for {src} (no .stfolder in it "
+                f"or any parent), so the destination cannot be checked "
+                f"against it. Pass share_root explicitly."
+            )
     else:
-        # Fallback to cwd if no .stfolder
-        share_root = Path.cwd().resolve()
+        share_root = Path(share_root).resolve()
 
-    try:
-        dest.relative_to(share_root)
-        in_share = True
-    except ValueError:
-        in_share = False
-
-    if in_share:
-        raise ValueError(f"Destination {dest} is inside the share directory {share_root}")
+    if dest == share_root or share_root in dest.parents:
+        raise ValueError(
+            f"quarantine destination {dest} is inside the share {share_root}; "
+            f"the copy must land on node-local storage outside it"
+        )
 
     dest.mkdir(parents=True, exist_ok=True)
     target = dest / src.name
     shutil.copy2(src, target)
     return target
 
+
 def is_safe_archive_member(member_path: str, dest_dir: Path) -> bool:
-    dest = dest_dir.resolve()
-    # Resolve the member path against the destination directory
-    # member_path is just a string relative path from the archive
-    # os.path.join handles absolute paths in member_path poorly (it resets to root)
-    # pathlib handles it nicely: Path('/dest') / '/etc/passwd' -> Path('/etc/passwd')
-    # which is wrong for extraction. We must use lstrip('/').
-    clean_member = str(member_path).lstrip('/')
-    member_resolved = (dest / clean_member).resolve()
+    """Whether an archive member extracts to somewhere inside ``dest_dir``.
+
+    Rejects the traversal shapes: ``../`` escapes, absolute member paths, and
+    paths that leave the destination once symlinks along the way are resolved.
+
+    NOT sufficient on its own. This checks a member's PATH; it does not check
+    its TYPE. An archive whose members are a symlink pointing outside the
+    destination followed by a regular file writing through it defeats a
+    path-only check, because each member's path is inside the destination and
+    the escape happens at extraction time. Callers must refuse symlink and
+    hardlink members outright, and should extract into a fresh empty directory.
+    """
+    dest = Path(dest_dir).resolve()
+
+    # Absolute members are REFUSED, not silently made relative. tar's own
+    # behaviour is to strip the leading separator and extract anyway; that is a
+    # reasonable default for an archiver and a poor one for a guard, because it
+    # turns "/etc/passwd" into a quiet write to <dest>/etc/passwd rather than a
+    # question. Both separators are checked: an archive built on one platform
+    # is routinely extracted on the other, and a leading backslash is
+    # drive-relative on Windows.
+    raw = str(member_path)
+    normalised = raw.replace("\\", "/")
+    if not normalised or normalised.startswith("/"):
+        return False
+    if len(raw) >= 2 and raw[1] == ":":          # C:\... or C:/...
+        return False
+    if normalised.startswith("../") or normalised == "..":
+        return False
+    clean = normalised
 
     try:
-        member_resolved.relative_to(dest)
-        return True
-    except ValueError:
+        resolved = (dest / clean).resolve()
+    except (OSError, ValueError):
         return False
 
+    return resolved == dest or dest in resolved.parents
 
 
 def sha256(path: Path) -> str:
